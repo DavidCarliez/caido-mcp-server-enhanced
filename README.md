@@ -22,9 +22,13 @@
 
 ## Why This Fork
 
-Upstream [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server) is a good server. It also assumes a human is paging a proxy, not an agent paying for every byte: `caido_list_requests` starts at the oldest row, discards the `count` that Caido already returns, and sends each body whole.
+Upstream [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server) is a complete wrapper around Caido's GraphQL API, but three server-side primitives stay unused, and the cost lands on every agent that asks a question about history:
 
-I sent the fixes upstream. The ordering/totals PR ([#73](https://github.com/c0tton-fluff/caido-mcp-server/pull/73)) has sat open without review, and the rest of the set would not land either, so this fork carries them. It also carries work that exists in neither repo: WebSocket replay writes, plugin backend calls, and binary-safe bodies.
+- **No sort order on `caido_list_requests`.** The only way to reach the newest row is paging from the oldest, so `newest request` is a history-traversal problem instead of a query.
+- **The query's `count` is discarded.** Caido returns the matching count with every page; the tool drops it, so a total requires listing every match.
+- **Bodies are text-only.** `caido_get_request` decodes the body as a string, so any non-UTF-8 payload (PNG, protobuf, compressed) arrives as U+FFFD and cannot be used.
+
+This fork exposes those primitives and adds surfaces upstream does not have: WebSocket replay writes, plugin backend calls, and byte-exact binary bodies.
 
 It stays a drop-in replacement: same binary names, same `~/.caido-mcp` token store, same tool names, and any call that does not use a new parameter sends the exact query upstream sends.
 
