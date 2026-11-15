@@ -1,12 +1,12 @@
 #!/bin/bash
-# Caido MCP Server & CLI Installer
+# caido-mcp-server-enhanced & CLI Installer
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/c0tton-fluff/caido-mcp-server/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/DavidCarliez/caido-mcp-server-enhanced/main/install.sh | bash
 #   curl -fsSL ... | TOOL=cli bash
 
 set -e
 
-REPO="c0tton-fluff/caido-mcp-server"
+REPO="DavidCarliez/caido-mcp-server-enhanced"
 
 # Fetch latest release version from GitHub API
 if [ -n "${VERSION:-}" ]; then

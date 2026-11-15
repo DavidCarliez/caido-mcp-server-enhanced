@@ -2,21 +2,67 @@
   <img src="https://raw.githubusercontent.com/caido/caido/main/brand/png/logo.png" alt="Caido" width="120"/>
 </p>
 
-<h1 align="center">caido-mcp-server</h1>
+<h1 align="center">caido-mcp-server-enhanced</h1>
 
 <p align="center">
-  MCP server and CLI for <a href="https://caido.io">Caido</a> web proxy - browse, replay, and analyze HTTP traffic from AI assistants or your terminal.
+  MCP server and CLI for <a href="https://caido.io">Caido</a>, tuned for agents that have to read a real proxy history:
+  newest-first listing, totals, match snippets, base64 bodies and WebSocket replay.
+  A drop-in fork of <a href="https://github.com/c0tton-fluff/caido-mcp-server">c0tton-fluff/caido-mcp-server</a>.
 </p>
 
 <p align="center">
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
-  <a href="https://github.com/c0tton-fluff/caido-mcp-server/releases"><img src="https://img.shields.io/github/v/release/c0tton-fluff/caido-mcp-server" alt="Release"></a>
+  <a href="https://github.com/c0tton-fluff/caido-mcp-server"><img src="https://img.shields.io/badge/fork%20of-v4.4.0-6f42c1" alt="Fork of upstream v4.4.0"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-8A2BE2" alt="MCP"></a>
-  <a href="https://github.com/c0tton-fluff/caido-mcp-server/actions/workflows/ci.yml"><img src="https://github.com/c0tton-fluff/caido-mcp-server/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
+  <a href="https://github.com/DavidCarliez/caido-mcp-server-enhanced/actions/workflows/ci.yml"><img src="https://github.com/DavidCarliez/caido-mcp-server-enhanced/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
 
 ---
+
+## Why This Fork
+
+Upstream [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server) is a good server. It also assumes a human is paging a proxy, not an agent paying for every byte: `caido_list_requests` starts at the oldest row, discards the `count` that Caido already returns, and sends each body whole.
+
+I sent the fixes upstream. The ordering/totals PR ([#73](https://github.com/c0tton-fluff/caido-mcp-server/pull/73)) has sat open without review, and the rest of the set would not land either, so this fork carries them. It also carries work that exists in neither repo: WebSocket replay writes, plugin backend calls, and binary-safe bodies.
+
+It stays a drop-in replacement: same binary names, same `~/.caido-mcp` token store, same tool names, and any call that does not use a new parameter sends the exact query upstream sends.
+
+### Measured with the proxy MCP benchmark
+
+The numbers come from [`proxy-mcp-bench`](https://github.com/DavidCarliez/proxy-mcp-bench): a deterministic 20,001-request corpus, 14 scripted tasks and 6 plain-language tasks run three times each through headless Claude Code (Sonnet).
+
+| 14 scripted tasks | Correct | Tool calls | Output returned to the model |
+|---|---:|---:|---:|
+| upstream v4.4.0 | 13 / 14 | 96 | 1.0 MB |
+| **this fork** | **14 / 14** | **18** | **21.7 KB** |
+
+| 18 agent runs | Correct | Time | Tokens | Cost |
+|---|---:|---:|---:|---:|
+| upstream v4.4.0 | 15 / 18 | 139 s | 0.91 M | $0.77 |
+| **this fork** | **18 / 18** | **68 s** | **0.41 M** | **$0.42** |
+
+Two tasks explain most of the gap:
+
+- **Newest request.** Upstream pages from the oldest row: 201 calls and 2.0 MB at 20k, 1,001 calls and 10 MB at 100k (its only shortcut is a row-ID bisection nothing in the tool description suggests). Here it is one call: `{"limit": 1, "order": "desc"}`.
+- **Counting matches.** Upstream lists every match to count them: 5,211 matches cost 53 calls and 522 KB. Here `{"httpql": "...", "limit": 1}` returns `totalCount` in one call and 199 bytes.
+
+The cost is context: the benchmark measured about 22,200 tokens of tool definitions for the 70-tool fork build against 20,700 upstream, paid on every turn. Four tools have been added since. Worth it when the history is large, which is the case this fork targets.
+
+## What's Added Over Upstream
+
+| Area | Upstream v4.4.0 | This fork |
+|---|---|---|
+| **Listing and sorting** | Oldest-first paging, cursor only, no total | `orderBy` (11 fields) + `order`, `totalCount` on every response, cursors that keep the requested order |
+| **Finding a value** | Fetch rows, then fetch bodies | `snippet` returns each regex hit with part, byte offset and context, without the body |
+| **Row provenance** | Rows show id/method/URL/status only | `source` on rows that did not come from the proxy (`REPLAY`, `AUTOMATE`, `WORKFLOW`, `PLUGIN`, `IMPORT`) plus `INTERCEPT` via `fields` |
+| **Body handling** | Any non-UTF-8 body comes back as U+FFFD text | `bodyEncoding` (`auto`/`text`/`base64`), `bodyBase64`, `bodySize`, byte-exact `bodyOffset`, rune-safe text slices |
+| **Sitemap** | Browse the tree | `capturedRequests` per host, `depth: "all"`, local `limit` with `totalEntries`/`truncated`, optional per-entry `requestCount` |
+| **Plugins** | List packages | `caido_call_plugin` calls a registered backend function; `caido_list_plugins` reports `manifestId` and backend `{id, running, error}` |
+| **WebSocket replay** | List streams and frames only | Read a WS replay entry (handshake, draft, frames), `caido_set_ws_message_draft`, `caido_clear_ws_message_draft`, `caido_send_ws_message` |
+| **WS stream paging** | Page of mostly-HTTP streams could hide WebSockets | Pages until the requested count, resumes from the last consumed cursor |
+
+Details, parameters and limits for each are in the tool tables below.
 
 ## What It Does
 
@@ -107,30 +153,18 @@ When enabled, real credential values flow through tool output to the model; leav
 
 ### Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/c0tton-fluff/caido-mcp-server/main/install.sh | bash
-```
-
-Or download a pre-built binary from [Releases](https://github.com/c0tton-fluff/caido-mcp-server/releases) (macOS, Linux, Windows - amd64/arm64).
-
-Or install with the Go toolchain (Go 1.25+):
+There are no tagged releases yet, so the upstream installer and upstream binaries would give you upstream rather than this fork. Build it from a clone (Go 1.25+):
 
 ```bash
-go install github.com/c0tton-fluff/caido-mcp-server/v4/cmd/caido-mcp-server@latest
-```
-
-The binary lands in `$(go env GOPATH)/bin` (add it to your `PATH`). The installed binary reports its module version via `caido-mcp-server --version`.
-
-<details>
-<summary>Build from source</summary>
-
-```bash
-git clone https://github.com/c0tton-fluff/caido-mcp-server.git
-cd caido-mcp-server
+git clone https://github.com/DavidCarliez/caido-mcp-server-enhanced.git
+cd caido-mcp-server-enhanced
 go build -ldflags "-X github.com/c0tton-fluff/caido-mcp-server/v4/internal/buildinfo.version=$(git describe --tags)" -o caido-mcp-server ./cmd/caido-mcp-server
+install -m 0755 caido-mcp-server ~/.local/bin/
 ```
 
-</details>
+The binary keeps the name `caido-mcp-server`, so existing MCP client configs, token store and agent setups keep working unchanged. Tag a release and `.github/workflows/release.yml` builds macOS, Linux and Windows binaries (amd64/arm64) for this repo; `install.sh` in this tree then installs those.
+
+The Go module path is still `github.com/c0tton-fluff/caido-mcp-server/v4` so upstream commits can be cherry-picked cleanly. That means `go install github.com/c0tton-fluff/caido-mcp-server/v4/cmd/caido-mcp-server@latest` installs **upstream**, not this fork: clone and build instead.
 
 ### Quick Start
 
@@ -619,28 +653,14 @@ Standalone terminal client for Caido. No MCP required - use it directly from you
 
 ### Install
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/c0tton-fluff/caido-mcp-server/main/install.sh | TOOL=cli bash
-```
-
-Or download from [Releases](https://github.com/c0tton-fluff/caido-mcp-server/releases).
-
-Or install with the Go toolchain (Go 1.25+):
+Same clone as the server, different command:
 
 ```bash
-go install github.com/c0tton-fluff/caido-mcp-server/v4/cmd/caido-cli@latest
-```
-
-<details>
-<summary>Build from source</summary>
-
-```bash
-git clone https://github.com/c0tton-fluff/caido-mcp-server.git
-cd caido-mcp-server
+git clone https://github.com/DavidCarliez/caido-mcp-server-enhanced.git
+cd caido-mcp-server-enhanced
 go build -o caido-cli ./cmd/caido-cli
+install -m 0755 caido-cli ~/.local/bin/
 ```
-
-</details>
 
 ### Usage
 
@@ -718,7 +738,7 @@ caido-mcp-server/
     testutil/     Mock GraphQL server, MCP test helpers, fixtures
 ```
 
-The `cmd/` directory names match the installed binary names so `go install .../cmd/caido-mcp-server@latest` produces a correctly-named binary. Both commands share `internal/` packages. The project uses [caido-community/sdk-go](https://github.com/caido-community/sdk-go) for all GraphQL communication with Caido.
+The `cmd/` directory names match the installed binary names, so a local build produces `caido-mcp-server` and `caido-cli` directly. Both commands share `internal/` packages. The project uses [caido-community/sdk-go](https://github.com/caido-community/sdk-go) for all GraphQL communication with Caido.
 
 ---
 
@@ -763,6 +783,10 @@ go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.12.2
 
 Built with [caido-community/sdk-go](https://github.com/caido-community/sdk-go) and [modelcontextprotocol/go-sdk](https://github.com/modelcontextprotocol/go-sdk).
 
+## Fork
+
+This repository is a fork of [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server), MIT-licensed, and upstream remains the origin of every tool not listed under [What's Added Over Upstream](#whats-added-over-upstream). The benchmark behind the numbers lives in [`DavidCarliez/proxy-mcp-bench`](https://github.com/DavidCarliez/proxy-mcp-bench); the Burp half of the same work is [`DavidCarliez/burp-mcp-enhanced`](https://github.com/DavidCarliez/burp-mcp-enhanced).
+
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE), same as upstream.
