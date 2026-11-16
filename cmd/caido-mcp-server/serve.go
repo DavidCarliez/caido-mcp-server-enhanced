@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 
 	"github.com/c0tton-fluff/caido-mcp-server/v4/internal/auth"
@@ -26,12 +28,83 @@ It requires authentication via 'caido-mcp-server login' first.`,
 	RunE: runServe,
 }
 
+// newServer builds the MCP server without tools or resources. It is the
+// single construction site, so tests exercise the same options serve runs
+// with. Protocol versions are left at the SDK default (latest supported).
+func newServer(opts tools.Options) *mcp.Server {
+	return mcp.NewServer(
+		&mcp.Implementation{
+			Name:    "caido-mcp-server",
+			Version: buildinfo.Version(),
+		},
+		&mcp.ServerOptions{Instructions: tools.InstructionsFor(opts)},
+	)
+}
+
 func init() {
+	serveCmd.Flags().Bool("read-only", false,
+		"Expose only tools that read state: nothing that sends traffic or "+
+			"changes the Caido project (or set CAIDO_MCP_READ_ONLY=1)")
+	serveCmd.Flags().Bool("enforce-scope", false,
+		"Refuse requests to hosts outside the project scope and withhold the "+
+			"tools that change scopes or switch projects (or set CAIDO_MCP_ENFORCE_SCOPE=1)")
+	serveCmd.Flags().StringSlice("toolsets", nil,
+		"Register only these toolsets, comma separated (or set CAIDO_MCP_TOOLSETS). "+
+			"Default: all. Available:\n  "+strings.Join(tools.ToolsetNames(), "\n  "))
+	serveCmd.Flags().Bool("compact", false,
+		"Leave output schemas out of the advertised tool list, about a third "+
+			"of its size (or set CAIDO_MCP_COMPACT=1)")
 	rootCmd.AddCommand(serveCmd)
+}
+
+// boolOption reports whether a boolean serve option is on: its flag, or its
+// environment variable set to a true value (MCP client configs set
+// environment variables more readily than arguments). A value that does not
+// parse as a boolean is an error rather than a silent "off": for the safety
+// restrictions the operator must not get the unrestricted server from a typo.
+func boolOption(cmd *cobra.Command, flag, env string) (bool, error) {
+	if on, _ := cmd.Flags().GetBool(flag); on {
+		return true, nil
+	}
+	v := os.Getenv(env)
+	if v == "" {
+		return false, nil
+	}
+	on, err := strconv.ParseBool(v)
+	if err != nil {
+		return false, fmt.Errorf("%s=%q is not a boolean (use 1 or 0)", env, v)
+	}
+	return on, nil
+}
+
+// serveOptions gathers the tool options from flags and environment.
+func serveOptions(cmd *cobra.Command) (tools.Options, error) {
+	var opts tools.Options
+	var err error
+	if opts.ReadOnly, err = boolOption(cmd, "read-only", "CAIDO_MCP_READ_ONLY"); err != nil {
+		return opts, err
+	}
+	if opts.EnforceScope, err = boolOption(cmd, "enforce-scope", "CAIDO_MCP_ENFORCE_SCOPE"); err != nil {
+		return opts, err
+	}
+	if opts.Compact, err = boolOption(cmd, "compact", "CAIDO_MCP_COMPACT"); err != nil {
+		return opts, err
+	}
+	opts.Toolsets, _ = cmd.Flags().GetStringSlice("toolsets")
+	if len(opts.Toolsets) == 0 {
+		if v := os.Getenv("CAIDO_MCP_TOOLSETS"); v != "" {
+			opts.Toolsets = strings.Split(v, ",")
+		}
+	}
+	return opts, nil
 }
 
 func runServe(cmd *cobra.Command, args []string) error {
 	caidoURL, err := getCaidoURL(cmd)
+	if err != nil {
+		return err
+	}
+	opts, err := serveOptions(cmd)
 	if err != nil {
 		return err
 	}
@@ -78,20 +151,17 @@ func runServe(cmd *cobra.Command, args []string) error {
 		)
 	}
 
-	server := mcp.NewServer(
-		&mcp.Implementation{
-			Name:    "caido-mcp-server",
-			Version: buildinfo.Version(),
-		},
-		nil,
-	)
+	server := newServer(opts)
 
-	toolCount := tools.RegisterAll(server, client)
+	toolCount, err := tools.RegisterAllWith(ctx, server, client, opts)
+	if err != nil {
+		return err
+	}
 
 	// Resources (read-only data for agent context)
 	resourceCount := resources.RegisterAll(server, client)
 
-	logStartup(caidoURL, authMode, toolCount, resourceCount)
+	logStartup(caidoURL, authMode, toolCount, resourceCount, opts)
 
 	if err := server.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		return fmt.Errorf("server error: %w", err)
@@ -118,12 +188,28 @@ func staticToken() (token, source string) {
 // logStartup prints a startup banner to stderr. It must never write to
 // stdout: stdout is the MCP JSON-RPC channel and any extra bytes there
 // would corrupt the protocol stream.
-func logStartup(caidoURL, authMode string, toolCount, resourceCount int) {
+func logStartup(
+	caidoURL, authMode string, toolCount, resourceCount int, opts tools.Options,
+) {
 	fmt.Fprintf(os.Stderr, "caido-mcp-server %s\n", buildinfo.Version())
 	fmt.Fprintf(os.Stderr, "  Caido URL:  %s\n", caidoURL)
 	fmt.Fprintf(os.Stderr, "  Auth:       %s\n", authMode)
 	fmt.Fprintf(os.Stderr, "  Registered: %d tools, %d resources\n",
 		toolCount, resourceCount)
+	if len(opts.Toolsets) > 0 {
+		fmt.Fprintf(os.Stderr, "  Toolsets:   %s\n", strings.Join(opts.Toolsets, ","))
+	}
+	if opts.Compact {
+		fmt.Fprintln(os.Stderr, "  Compact:    output schemas left out of the tool list")
+	}
+	if opts.ReadOnly {
+		fmt.Fprintln(os.Stderr,
+			"  Mode:       read-only (tools that send traffic or change the project are not registered)")
+	}
+	if opts.EnforceScope {
+		fmt.Fprintln(os.Stderr,
+			"  Scope:      enforced (out-of-scope targets refused; scope and project tools withheld)")
+	}
 	fmt.Fprintln(os.Stderr,
 		"  Transport:  stdio (ready, waiting for MCP client)")
 }

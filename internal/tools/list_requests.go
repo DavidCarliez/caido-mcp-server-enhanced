@@ -21,6 +21,7 @@ type ListRequestsInput struct {
 	After   string `json:"after,omitempty" jsonschema:"Cursor for pagination from previous response nextCursor"`
 	OrderBy string `json:"orderBy,omitempty" jsonschema:"Field to sort by (default id). Omit to leave the server's default order untouched"`
 	Order   string `json:"order,omitempty" jsonschema:"Sort direction: asc or desc. Set order without orderBy to sort by id, i.e. desc gives the newest requests first"`
+	ScopeID string `json:"scopeId,omitempty" jsonschema:"Only requests inside this scope (ID from caido_list_scopes). Combines with httpql; totalCount then counts in-scope matches"`
 	// Snippet runs a RE2 regex over the returned rows and reports matches
 	// with context, without returning the bodies.
 	Snippet *ListRequestsSnippetInput `json:"snippet,omitempty" jsonschema:"Regex scan over the returned rows: {regex, context, maxPerRequest, parts}"`
@@ -113,9 +114,7 @@ func buildRequestOrder(
 	return &gen.RequestResponseOrderInput{By: by, Ordering: ordering}, nil
 }
 
-// RequestSummary is a minimal representation of a request. The optional
-// fields are only set when requested through fields or snippet, so the default
-// row is unchanged.
+// RequestSummary is a minimal representation of a request
 type RequestSummary struct {
 	ID             string  `json:"id"`
 	Method         string  `json:"method"`
@@ -251,6 +250,12 @@ func listRequestsHandler(
 		if input.HTTPQL != "" {
 			opts.Filter = &input.HTTPQL
 		}
+		if input.ScopeID != "" {
+			if err := requireScope(ctx, client, input.ScopeID); err != nil {
+				return nil, ListRequestsOutput{}, err
+			}
+			opts.ScopeID = &input.ScopeID
+		}
 		if input.After != "" {
 			opts.After = &input.After
 		}
@@ -304,7 +309,7 @@ func RegisterListRequestsTool(
 	mcp.AddTool(server, &mcp.Tool{
 		Name:        "caido_list_requests",
 		Title:       "List Requests",
-		Description: `List HTTP requests. Filter with httpql (e.g. req.host.eq:"example.com"). On Caido 0.58+ match headers and bodies directly instead of scanning raw: req.header["Authorization"].cont:"Bearer", resp.body.cont:"stack trace". Returns id/method/url/status, and totalCount = how many requests match httpql. Newest first in one call: limit:5 with order:"desc" (sorts by id); orderBy picks the field (createdAt, statusCode, roundtripTime, responseLength, host, path, ...). Counting matches is limit:1 plus totalCount; no paging needed. Paginate with after from nextCursor, which keeps the same order. See a value without downloading bodies: snippet:{regex:"AKIA[0-9A-Z]{16}"} scans the returned rows (responseBody by default; requestBody and headers optional) and reports each match's part, byte offset and context excerpt, up to 3 per row. fields adds createdAt, host, path, query, source, responseLength or roundtripTime to each row. Rows that did not come through the proxy (source REPLAY, AUTOMATE, WORKFLOW, PLUGIN, IMPORT, SAMPLE) carry their source automatically; add source:"intercept" to httpql to list only captured proxy traffic.`,
+		Description: `List HTTP requests. Filter with httpql (e.g. req.host.eq:"example.com"). On Caido 0.58+ match headers and bodies directly instead of scanning raw: req.header["Authorization"].cont:"Bearer", resp.body.cont:"stack trace". Returns id/method/url/status, and totalCount = how many requests match httpql. Newest first in one call: limit:5 with order:"desc" (sorts by id); orderBy picks the field (createdAt, statusCode, roundtripTime, responseLength, host, path, ...). Counting matches is limit:1 plus totalCount; no paging needed. scopeId restricts the listing and the count to one scope (caido_list_scopes). See a value without downloading bodies: snippet:{regex:"AKIA[0-9A-Z]{16}"} returns each hit with its part, byte offset and context instead of the bodies. fields adds createdAt/host/path/query/source/responseLength/roundtripTime to each row, and rows that did not come from the proxy carry a source (REPLAY, AUTOMATE, WORKFLOW, PLUGIN, IMPORT) without asking. Paginate with after from nextCursor, which keeps the same order.`,
 		InputSchema: schemaFor[ListRequestsInput](func(s *jsonschema.Schema) {
 			if p := prop(s, "httpql"); p != nil {
 				p.MaxLength = intPtr(10000)

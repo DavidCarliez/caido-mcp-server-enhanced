@@ -13,7 +13,7 @@
 <p align="center">
   <a href="https://go.dev"><img src="https://img.shields.io/badge/Go-1.25+-00ADD8?logo=go&logoColor=white" alt="Go"></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License"></a>
-  <a href="https://github.com/c0tton-fluff/caido-mcp-server"><img src="https://img.shields.io/badge/fork%20of-v4.4.0-6f42c1" alt="Fork of upstream v4.4.0"></a>
+  <a href="https://github.com/c0tton-fluff/caido-mcp-server"><img src="https://img.shields.io/badge/fork%20of-v4.5.0-6f42c1" alt="Fork of upstream v4.5.0"></a>
   <a href="https://modelcontextprotocol.io"><img src="https://img.shields.io/badge/MCP-compatible-8A2BE2" alt="MCP"></a>
   <a href="https://github.com/DavidCarliez/caido-mcp-server-enhanced/actions/workflows/ci.yml"><img src="https://github.com/DavidCarliez/caido-mcp-server-enhanced/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
 </p>
@@ -22,11 +22,15 @@
 
 ## Why This Fork
 
-Upstream [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server) is a complete wrapper around Caido's GraphQL API, but three server-side primitives stay unused, and the cost lands on every agent that asks a question about history:
+Upstream [`c0tton-fluff/caido-mcp-server`](https://github.com/c0tton-fluff/caido-mcp-server) is a complete wrapper around Caido's GraphQL API, but several server-side primitives stay unused, and the cost lands on every agent that asks a question about history:
 
-- **No sort order on `caido_list_requests`.** The only way to reach the newest row is paging from the oldest, so `newest request` is a history-traversal problem instead of a query.
-- **The query's `count` is discarded.** Caido returns the matching count with every page; the tool drops it, so a total requires listing every match.
 - **Bodies are text-only.** `caido_get_request` decodes the body as a string, so any non-UTF-8 payload (PNG, protobuf, compressed) arrives as U+FFFD and cannot be used.
+- **Finding a value means downloading bodies.** A regex hit inside a response requires fetching the whole response first.
+- **The sitemap reports no volume.** A host entry lists its children but not how many requests were captured for it, so "biggest host" is a guess.
+- **Plugin backend functions have no surface.** Plugins register functions (`sdk.api.register`) that an agent can only reach by hand-rolling a REST call with the access token.
+- **WebSocket replay entries cannot be read or drafted.** The replay tab holds a pending message and the frames recorded on it; upstream exposes only live sockets.
+
+The sort order and the matching count from the original list were proposed upstream and merged ([#73](https://github.com/c0tton-fluff/caido-mcp-server/pull/73)).
 
 This fork exposes those primitives and adds surfaces upstream does not have: WebSocket replay writes, plugin backend calls, and byte-exact binary bodies.
 
@@ -51,19 +55,19 @@ Two tasks explain most of the gap:
 - **Newest request.** Upstream pages from the oldest row: 201 calls and 2.0 MB at 20k, 1,001 calls and 10 MB at 100k (its only shortcut is a row-ID bisection nothing in the tool description suggests). Here it is one call: `{"limit": 1, "order": "desc"}`.
 - **Counting matches.** Upstream lists every match to count them: 5,211 matches cost 53 calls and 522 KB. Here `{"httpql": "...", "limit": 1}` returns `totalCount` in one call and 199 bytes.
 
-The cost is context: the benchmark measured about 22,200 tokens of tool definitions for the 70-tool fork build against 20,700 upstream, paid on every turn. Four tools have been added since. Worth it when the history is large, which is the case this fork targets.
+The cost is context: the benchmark measured about 22,200 tokens of tool definitions for the 70-tool fork build against 20,700 upstream, paid on every turn. The fork now advertises 80 tools (upstream v4.5.0, 76): the four additions are plugin backend calls and the WebSocket draft tools. Worth it when the history is large, which is the case this fork targets.
 
 ## What's Added Over Upstream
 
-| Area | Upstream v4.4.0 | This fork |
+| Area | Upstream v4.5.0 | This fork |
 |---|---|---|
-| **Listing and sorting** | Oldest-first paging, cursor only, no total | `orderBy` (11 fields) + `order`, `totalCount` on every response, cursors that keep the requested order |
+| **Listing and sorting** | `orderBy` + `order`, `totalCount`, `scopeId` (merged from this fork, [#73](https://github.com/c0tton-fluff/caido-mcp-server/pull/73)) | Same, plus `fields` for per-row values |
 | **Finding a value** | Fetch rows, then fetch bodies | `snippet` returns each regex hit with part, byte offset and context, without the body |
 | **Row provenance** | Rows show id/method/URL/status only | `source` on rows that did not come from the proxy (`REPLAY`, `AUTOMATE`, `WORKFLOW`, `PLUGIN`, `IMPORT`) plus `INTERCEPT` via `fields` |
 | **Body handling** | Any non-UTF-8 body comes back as U+FFFD text | `bodyEncoding` (`auto`/`text`/`base64`), `bodyBase64`, `bodySize`, byte-exact `bodyOffset`, rune-safe text slices |
 | **Sitemap** | Browse the tree | `capturedRequests` per host, `depth: "all"`, local `limit` with `totalEntries`/`truncated`, optional per-entry `requestCount` |
 | **Plugins** | List packages | `caido_call_plugin` calls a registered backend function; `caido_list_plugins` reports `manifestId` and backend `{id, running, error}` |
-| **WebSocket replay** | List streams and frames only | Read a WS replay entry (handshake, draft, frames), `caido_set_ws_message_draft`, `caido_clear_ws_message_draft`, `caido_send_ws_message` |
+| **WebSocket replay** | Live sockets (`caido_ws_connect/send/read/close`) plus stream history | Read and draft a WS replay entry (handshake, draft, recorded frames), `caido_set_ws_message_draft`, `caido_clear_ws_message_draft`, `caido_send_ws_message`, plus the live-socket tools |
 | **WS stream paging** | Page of mostly-HTTP streams could hide WebSockets | Pages until the requested count, resumes from the last consumed cursor |
 
 Details, parameters and limits for each are in the tool tables below.
@@ -72,7 +76,7 @@ Details, parameters and limits for each are in the tool tables below.
 
 Two ways to interact with your Caido proxy:
 
-- **MCP Server** - expose 74 tools and 6 read-only resources to AI assistants (Claude Code, Cursor, etc.) via the Model Context Protocol
+- **MCP Server** - expose 80 tools and 6 read-only resources to AI assistants (Claude Code, Cursor, etc.) via the Model Context Protocol
 - **CLI** - standalone terminal client for pentesters who prefer the command line
 
 Both share the same auth token, the same Go SDK, and the same codebase.
